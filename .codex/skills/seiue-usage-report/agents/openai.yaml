@@ -1,0 +1,4 @@
+interface:
+  display_name: "希悦使用情况报告"
+  short_description: "读取或刷新希悦 Redash 快照，并生成管理层 HTML 深度报告"
+  default_prompt: "使用 $seiue-usage-report 为某个 school_id 处理希悦单校活跃度看板：如果用户明确给出 output 下的 JSON 快照，就直接基于该快照分析并写出单文件 HTML；否则先读取进程环境变量和仓库根目录 .env，再运行拉数脚本刷新 snapshot，然后只基于单个 snapshot 输出管理层报告。保留 fetch_redash_dashboard.py 作为拉数脚本，但不要新增 generate_seiue_usage_report.py 之类中间 HTML 生成脚本；最终页面直接内嵌 ECharts 的 SVG renderer。"
