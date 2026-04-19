@@ -1,4 +1,4 @@
 interface:
   display_name: "希悦使用情况报告"
   short_description: "输入学校ID，生成希悦系统 HTML 深度使用报告"
-  default_prompt: "使用 $seiue-usage-report 为某个 school_id 处理希悦单校活跃度看板：如果用户明确给出 output 下的 JSON 快照，就直接基于该快照分析并写出单文件 HTML；否则先读取进程环境变量和仓库根目录 .env，再运行拉数脚本刷新 snapshot，然后只基于单个 snapshot 输出管理层报告。保留 fetch_redash_dashboard.py 作为拉数脚本，但不要新增 generate_seiue_usage_report.py 之类中间 HTML 生成脚本；最终页面直接内嵌 ECharts 的 SVG renderer。"
+  default_prompt: "使用 $seiue-usage-report 为某个 school_id 处理希悦单校活跃度看板：school_id 一旦明确，先确保 output 下已有该学校当天可用快照。若当天快照存在且结构完整，则直接复用，这就视为数据已在本地保存；只有用户明确要求刷新或当天快照无效时，才运行 fetch_redash_dashboard.py 重新拉数并保存。拉数脚本会先初始化快照，再随着 query 完成持续增量写回同一路径；如果用户强调尽快出稿，可以在 fetch_status.is_complete=false 但已有可分析模块时先基于当前快照生成阶段性 HTML 预览，并在快照完整后补齐定稿。整个过程直接生成单文件 HTML，不创建额外的 HTML 生成脚本；在页面内初始化 ECharts 的 SVG renderer，折线图默认用 markPoint 水滴形 pin 显示峰值数值标签。报告文件名必须包含学校名称或学校标识、日期和具体时间，避免覆盖历史报告。"

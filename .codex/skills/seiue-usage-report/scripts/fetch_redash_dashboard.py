@@ -10,13 +10,17 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 REQUIRED_ENV = ("REDASH_API_KEY", "REDASH_BASE_URL", "REDASH_DASHBOARD_ID")
 DEFAULT_CACHE_MAX_AGE = 60 * 60 * 24 * 365 * 10
+OUTPUT_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+
 class RedashError(Exception):
     def __init__(self, message: str, status: int | None = None) -> None:
         super().__init__(message)
@@ -153,6 +157,14 @@ def safe_filename_part(raw: Any) -> str:
     text = str(raw)
     text = re.sub(r"[^0-9A-Za-z._-]+", "-", text)
     return text.strip("-") or "unknown"
+
+
+def local_today_string() -> str:
+    return datetime.now(OUTPUT_TIMEZONE).date().isoformat()
+
+
+def iso_now() -> str:
+    return datetime.now(OUTPUT_TIMEZONE).isoformat(timespec="seconds")
 
 
 def extract_queries(dashboard: dict[str, Any]) -> list[dict[str, Any]]:
@@ -362,7 +374,7 @@ def fetch_query(
         }
 
 
-def build_summary(queries: list[dict[str, Any]]) -> dict[str, int]:
+def build_summary(queries: list[dict[str, Any]], total_queries: int | None = None) -> dict[str, int]:
     status_counts = {
         "cached": 0,
         "refreshed": 0,
@@ -385,15 +397,79 @@ def build_summary(queries: list[dict[str, Any]]) -> dict[str, int]:
             fetch_counts["refreshed_count"] += 1
 
     usable_count = status_counts["cached"] + status_counts["refreshed"]
+    completed_query_count = len(queries)
+    total_query_count = total_queries if total_queries is not None else completed_query_count
     return {
-        "total_queries": len(queries),
-        "success_count": len(queries) - status_counts["error"],
+        "total_queries": total_query_count,
+        "completed_query_count": completed_query_count,
+        "success_count": completed_query_count - status_counts["error"],
         "usable_query_count": usable_count,
         "cached_count": fetch_counts["cached_count"],
         "refreshed_count": fetch_counts["refreshed_count"],
         "empty_count": status_counts["empty"],
         "error_count": status_counts["error"],
+        "pending_count": max(total_query_count - completed_query_count, 0),
     }
+
+
+def build_fetch_status(
+    query_metas: list[dict[str, Any]],
+    queries: list[dict[str, Any]],
+    started_at: str,
+) -> dict[str, Any]:
+    completed_query_ids = {item.get("query_id") for item in queries}
+    pending_queries = [
+        {
+            "query_id": query_meta["query_id"],
+            "query_name": query_meta["query_name"],
+        }
+        for query_meta in query_metas
+        if query_meta["query_id"] not in completed_query_ids
+    ]
+    return {
+        "is_complete": len(pending_queries) == 0,
+        "started_at": started_at,
+        "updated_at": iso_now(),
+        "total_queries": len(query_metas),
+        "completed_query_count": len(queries),
+        "pending_query_count": len(pending_queries),
+        "pending_queries": pending_queries,
+    }
+
+
+def build_snapshot(
+    config: dict[str, str],
+    dashboard_id: str,
+    school_id: int | str,
+    dashboard: dict[str, Any],
+    query_metas: list[dict[str, Any]],
+    query_results: list[dict[str, Any]],
+    started_at: str,
+) -> dict[str, Any]:
+    return {
+        "generated_at": iso_now(),
+        "source": {
+            "base_url": config["REDASH_BASE_URL"],
+            "dashboard_id": dashboard_id,
+            "school_id": school_id,
+        },
+        "dashboard": {
+            "id": dashboard.get("id"),
+            "name": dashboard.get("name"),
+            "slug": dashboard.get("slug"),
+            "widget_count": len(dashboard.get("widgets") or []),
+            "query_count": len(query_metas),
+        },
+        "fetch_status": build_fetch_status(query_metas, query_results, started_at),
+        "queries": query_results,
+        "summary": build_summary(query_results, total_queries=len(query_metas)),
+    }
+
+
+def write_snapshot(output_path: Path, snapshot: dict[str, Any]) -> None:
+    temp_path = output_path.with_suffix(f"{output_path.suffix}.tmp")
+    temp_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(output_path)
 
 
 def parse_args() -> argparse.Namespace:
@@ -431,7 +507,7 @@ def main() -> int:
         if args.output
         else repo_root
         / "output"
-        / f"school-{safe_filename_part(school_id)}-dashboard-{safe_filename_part(dashboard_id)}-latest.json"
+        / f"school-{safe_filename_part(school_id)}-{local_today_string()}.json"
     )
     if not output_path.is_absolute():
         output_path = repo_root / output_path
@@ -452,35 +528,49 @@ def main() -> int:
     query_metas = extract_queries(dashboard)
     eprint(f"发现 dashboard query 数：{len(query_metas)}")
 
+    started_at = iso_now()
     query_results: list[dict[str, Any]] = []
+    initial_snapshot = build_snapshot(
+        config,
+        dashboard_id,
+        school_id,
+        dashboard,
+        query_metas,
+        query_results,
+        started_at,
+    )
+    write_snapshot(output_path, initial_snapshot)
+    eprint(f"已初始化增量快照：{output_path}")
+
     for index, query_meta in enumerate(query_metas, start=1):
         result = fetch_query(client, query_meta, school_id, args.cache_max_age, args.job_timeout)
         query_results.append(result)
+        snapshot = build_snapshot(
+            config,
+            dashboard_id,
+            school_id,
+            dashboard,
+            query_metas,
+            query_results,
+            started_at,
+        )
+        write_snapshot(output_path, snapshot)
         eprint(
             f"[{index}/{len(query_metas)}] query_id={query_meta['query_id']} "
             f"status={result['status']} rows={result['row_count']} name={query_meta['query_name']}"
         )
 
-    snapshot = {
-        "generated_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
-        "source": {
-            "base_url": config["REDASH_BASE_URL"],
-            "dashboard_id": dashboard_id,
-            "school_id": school_id,
-        },
-        "dashboard": {
-            "id": dashboard.get("id"),
-            "name": dashboard.get("name"),
-            "slug": dashboard.get("slug"),
-            "widget_count": len(dashboard.get("widgets") or []),
-            "query_count": len(query_metas),
-        },
-        "queries": query_results,
-        "summary": build_summary(query_results),
-    }
-
-    output_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
-    eprint(f"已写入数据快照：{output_path}")
+    snapshot = build_snapshot(
+        config,
+        dashboard_id,
+        school_id,
+        dashboard,
+        query_metas,
+        query_results,
+        started_at,
+    )
+    write_snapshot(output_path, snapshot)
+    eprint(f"已完成数据快照：{output_path}")
     print(output_path)
     return 0
 
